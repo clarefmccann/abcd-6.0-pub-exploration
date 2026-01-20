@@ -7,8 +7,8 @@ library(purrr) # loaded but not used in this version, which is fine!
 set.seed(90025)
 
 # define the root path for data
-pub_data_root = "/Users/clarefmccann/University\ of\ Oregon\ Dropbox/Clare\ McCann/mine/projects/abcd-projs/abcd-data-release-6.0/physical-health/puberty/"
-proj_root = "/Users/clarefmccann/University\ of\ Oregon\ Dropbox/Clare\ McCann/mine/projects/abcd-projs/puberty/"
+pub_data_root = "/u/projects/silvers/data/ABCD/ABCD-release-6.0/physical-health/puberty/"
+proj_root = "/u/home/c/clarefmc/projects/puberty/"
 
 # --- 1. model and helper functions (your original functions are great) ---
 

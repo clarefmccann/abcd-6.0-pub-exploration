@@ -15,8 +15,7 @@ set.seed(90025)
 
 # Define file paths (please update if necessary)
 pub_data_root <- file.path(
-  "/Users/clarefmccann/University of Oregon Dropbox",
-  "Clare McCann/mine/projects/abcd-projs/abcd-data-release-6.0/physical-health/puberty"
+  "/u/projects/silvers/data/ABCD/ABCD-release-6.0/physical-health/puberty"
 )
 
 # -----------------------------------------------------------------------------

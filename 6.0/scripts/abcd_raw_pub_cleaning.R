@@ -2,7 +2,7 @@
 
 library(dplyr)
 
-data_root = "/Users/clarefmccann/University\ of\ Oregon\ Dropbox/Clare\ McCann/mine/projects/abcd-projs/abcd-data-release-6.0/"
+data_root = "/u/projects/silvers/data/ABCD/ABCD-release-6.0/cfm/"
 
 age_sex <- read.csv(paste0(data_root,"abcd-general/ab_g_dyn.csv")) %>%
   select(participant_id, session_id, site, ab_g_dyn__visit_age, ab_g_stc__cohort_sex) %>%
