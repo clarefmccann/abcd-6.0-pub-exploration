@@ -1,0 +1,1564 @@
+---
+title: "exploring abcd pds"
+author: "cfm"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+### setting up markdown {.tabset}
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = TRUE,
+	warning = TRUE
+)
+
+options(scipen=999)
+
+```
+
+### loading required packages
+
+```{r load Required Packages, message=FALSE, warning=FALSE, include=FALSE}
+
+library(pacman)
+
+pacman::p_load(dplyr, ggplot2, tidyr, stringr, lubridate, psych, nlme, MuMIn, purrr, readr, install = TRUE)
+
+```
+
+# setting up
+
+```{r root path}
+
+proj_root = "/Users/clarefmccann/University\ of\ Oregon\ Dropbox/Clare\ McCann/mine/projects/abcd-projs/puberty/"
+data_root = "/Users/clarefmccann/University\ of\ Oregon\ Dropbox/Clare\ McCann/mine/projects/abcd-projs/abcd-data-release-6.0/"
+
+```
+
+## loading in data
+
+```{r loading in data}
+
+## SEX --> 1 = MALE, 2 = FEMALE (PARENT PDS)
+
+#source(paste0(proj_root, "6.0/scripts/abcd_raw_pub_cleaning.R"))
+
+```
+
+# conversion  
+
+```{r PDS to TS}
+
+#source(paste0(proj_root, "6.0/scripts/pds_to_ts.R"))
+
+```
+
+## checking regressors btw reporters and waves
+
+```{r regressors}
+
+# ------------------------------------------------------------
+# config
+# ------------------------------------------------------------
+# where to drop the csvs
+out_dir <- "/Users/clarefmccann/University of Oregon Dropbox/Clare McCann/mine/projects/abcd-projs/puberty/pub_exp_output/regressors/6.0/"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# canonical wave order
+wave_levels <- c(
+  "ses-00A",
+  "ses-01A",
+  "ses-02A",
+  "ses-03A",
+  "ses-04A",
+  "ses-05A",
+  "ses-06A"
+)
+
+wave_labels <- c(
+  "ses-00A" = "BL",
+  "ses-01A" = "FU1",
+  "ses-02A" = "FU2",
+  "ses-03A" = "FU3",
+  "ses-04A" = "FU4",
+  "ses-05A" = "FU5",
+  "ses-06A" = "FU6")
+
+allowed_transitions <- c(
+  "ses-00A to ses-01A",
+  "ses-00A to ses-02A",
+  "ses-00A to ses-03A",
+  "ses-00A to ses-04A",
+  "ses-00A to ses-05A",
+  "ses-00A to ses-06A",
+  "ses-01A to ses-02A",
+  "ses-01A to ses-03A",
+  "ses-01A to ses-04A",
+  "ses-01A to ses-05A",
+  "ses-01A to ses-06A",
+  "ses-02A to ses-03A",
+  "ses-02A to ses-04A",
+  "ses-02A to ses-05A",
+  "ses-02A to ses-06A",
+  "ses-03A to ses-04A",
+  "ses-03A to ses-05A",
+  "ses-03A to ses-06A",
+  "ses-04A to ses-05A",
+  "ses-04A to ses-06A",
+  "ses-05A to ses-06A")
+
+# ------------------------------------------------------------
+# core function
+# ------------------------------------------------------------
+generate_regressor_info <- function(df, label, sex, out_dir) {
+  stopifnot(all(c("id", "wave") %in% names(df)))
+
+  measures <- if (sex == "m") {
+    c("PDSS", "petam", "petbm", "petcm", "petdm", "mpete")
+  } else {
+    c("PDSS", "petaf", "petbf", "petcf", "petdf", "petef")
+  }
+
+  df_prepped <- df %>%
+  mutate(
+    wave = factor(wave, levels = wave_levels, ordered = TRUE),
+    wave_short = recode(
+      as.character(wave),
+      !!!wave_labels,
+      .default = as.character(wave)
+    )
+  ) %>%
+  arrange(id, wave) %>%
+  group_by(id) %>%
+  {
+    out <- .
+    for (m in measures) {
+      diff_col <- paste0(m, "_diff")
+      out[[diff_col]] <- out[[m]] - dplyr::lag(out[[m]])
+    }
+    out$prev_wave       <- dplyr::lag(out$wave)
+    out$prev_wave_short <- dplyr::lag(out$wave_short)
+    out$prev_wave_idx   <- dplyr::lag(as.integer(out$wave))
+    out
+  } %>%
+  ungroup() %>%
+  mutate(
+    wave_change_clean = paste(
+      as.character(prev_wave), "to", as.character(wave)
+    )
+  ) %>%
+  filter(
+    !is.na(prev_wave),
+    prev_wave_idx < as.integer(wave),
+    wave_change_clean %in% allowed_transitions
+  ) %>%
+  mutate(
+    wave_change_clean = factor(
+      wave_change_clean,
+      levels = allowed_transitions,
+      ordered = TRUE
+    )
+  )
+
+  df_flags <- df_prepped %>%
+    filter(!is.na(wave_change_clean)) %>%
+    {
+      out <- .
+      for (m in measures) {
+        flag_col <- paste0(m, "_regressed")
+        diff_col <- paste0(m, "_diff")
+        out[[flag_col]] <- out[[diff_col]] < 0
+      }
+      out
+    }
+
+  trans_long <- df_flags %>%
+    select(id, wave_change_clean, ends_with("_regressed")) %>%
+    pivot_longer(
+      cols = ends_with("_regressed"),
+      names_to = "measure",
+      values_to = "regressed"
+    ) %>%
+    mutate(measure = str_remove(measure, "_regressed"))
+
+  by_transition <- trans_long %>%
+    group_by(measure, wave_change_clean) %>%
+    summarise(
+      n_regressions = sum(regressed, na.rm = TRUE),
+      n_participants_regressed = n_distinct(id[regressed]),
+      .groups = "drop"
+    ) %>%
+    arrange(measure, wave_change_clean)
+
+  ever_by_measure <- trans_long %>%
+    group_by(measure, id) %>%
+    summarise(any_regression = any(regressed, na.rm = TRUE), .groups = "drop") %>%
+    group_by(measure) %>%
+    summarise(n_participants_any_regression = sum(any_regression), .groups = "drop") %>%
+    arrange(measure)
+  
+    id_pdss_counts <- df_flags %>%
+    group_by(id) %>%
+    summarise(
+      n_pdss_regressions = sum(PDSS_regressed, na.rm = TRUE),  
+      any_pdss_regression = any(PDSS_regressed, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  per_transition_any <- df_flags %>%
+    group_by(id, wave_change_clean) %>%
+    summarise(any_pdss_reg = any(PDSS_regressed, na.rm = TRUE), .groups = "drop_last") %>%
+    group_by(id) %>%
+    summarise(n_transitions_pdss_reg = sum(any_pdss_reg), .groups = "drop")
+
+  regression_env <- id_pdss_counts %>%
+    left_join(per_transition_any, by = "id") %>%
+    mutate(n_transitions_pdss_reg = tidyr::replace_na(n_transitions_pdss_reg, 0L))
+
+  stopifnot(all(regression_env$n_transitions_pdss_reg <= length(wave_levels) - 1))
+
+  assign(paste0("filtered_regression_env_pdss_", label), regression_env, envir = .GlobalEnv)
+  assign(paste0("ids_to_drop_pdss_", label),
+         regression_env %>% dplyr::filter(any_pdss_regression) %>% dplyr::pull(id),
+         envir = .GlobalEnv)
+  
+  write_csv(regression_env, file.path(out_dir, paste0("filtered_regression_env_", label, ".csv")))
+  write_csv(by_transition, file.path(out_dir, paste0("filtered_by_transition_", label, ".csv")))
+  write_csv(ever_by_measure, file.path(out_dir, paste0("filtered_ever_by_measure_", label, ".csv")))
+
+  invisible(list(by_transition = by_transition, ever_by_measure = ever_by_measure))
+}
+
+# ------------------------------------------------------------
+# read data
+# ------------------------------------------------------------
+
+datasets <- list(
+  pds_m_p = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_parent_tannerstages_m.csv")), sex = "m"),
+  pds_f_p = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_parent_tannerstages_f.csv")), sex = "f"),
+  pds_m_y = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_youth_tannerstages_m.csv")), sex = "m"),
+  pds_f_y = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_youth_tannerstages_f.csv")), sex = "f")
+)
+
+
+regressor_results <- purrr::imap(
+  datasets,
+  ~ {
+    suffix <- sub("^pds_", "", .y)
+    generate_regressor_info(df = .x$df, label = .y, sex = .x$sex, out_dir = out_dir)
+  }
+)
+
+
+``` 
+
+```{r corr btw reporters}
+
+combined_f <- inner_join(PDS_f_p_filtered, PDS_f_y_filtered, by = c("id", "wave")) %>%
+  rename(
+    PDSS_parent = PDSS.x,
+    PDSS_youth = PDSS.y
+  )
+
+cor_by_wave_f <- combined_f %>%
+  group_by(wave) %>%
+  summarise(correlation = cor(PDSS_parent, PDSS_youth, use = "complete.obs")) %>%
+  ungroup()
+
+combined_m <- inner_join(PDS_m_p, PDS_m_y, by = c("id", "wave")) %>%
+  rename(
+    PDSS_parent = PDSS.x,
+    PDSS_youth = PDSS.y
+  )
+
+cor_by_wave_m <- combined_m %>%
+  group_by(wave) %>%
+  summarise(correlation = cor(PDSS_parent, PDSS_youth, use = "complete.obs")) %>%
+  ungroup()
+
+write.csv(cor_by_wave_f, file = paste0(proj_root, "pub_exp_output/filtered_reporter_cor_by_wave_f.csv"))
+
+write.csv(cor_by_wave_m, file = paste0(proj_root, "pub_exp_output/filtered_reporter_cor_by_wave_m.csv"))
+
+```
+
+# exploration
+
+```{r exploration}
+
+out_dir <- "/Users/clarefmccann/University of Oregon Dropbox/Clare McCann/mine/projects/abcd-projs/puberty/pub_exp_output/visualizations/6.0/"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+wave_levels <- c("ses-00A","ses-01A","ses-02A","ses-03A","ses-04A","ses-05A","ses-06A")
+wave_labels <- c("ses-00A"="BL","ses-01A"="FU1","ses-02A"="FU2","ses-03A"="FU3","ses-04A"="FU4","ses-05A"="FU5","ses-06A"="FU6")
+
+# keep the plot theme boring to avoid font shenanigans
+# theme_set(theme_minimal(base_size = 11))
+
+# device safety net
+safe_save <- function(plot, filename, width, height, dpi = 300) {
+  tryCatch(
+    ggsave(filename = filename, plot = plot, width = width, height = height, dpi = dpi, device = "png"),
+    error = function(e) {
+      message("ggsave failed for ", filename, " (", conditionMessage(e), "). retrying via png()...")
+      grDevices::png(filename = filename, width = width, height = height, units = "in", res = dpi)
+      print(plot)
+      grDevices::dev.off()
+    }
+  )
+}
+
+
+# ------------------------------------------------------------
+# core function
+# ------------------------------------------------------------
+generate_visualizations <- function(df, label, sex, out_dir) {
+  stopifnot(all(c("id","wave","PDSS") %in% names(df)))
+  
+  plot_color_sex <- if (sex == "f") "#92374D" else "#56667A"
+
+  informant <- dplyr::case_when(
+    stringr::str_detect(label, "_p$") ~ "parent",
+    stringr::str_detect(label, "_y$") ~ "youth",
+    TRUE ~ "unknown"
+  )
+  
+  plot_color_reporter <- dplyr::case_when(
+    informant == "parent" ~ "#260F26", 
+    informant == "youth"  ~ "#ECA72C", # orange
+    TRUE                  ~ "#260F26"    # a default fallback 
+    )
+
+  dat <- df %>%
+    mutate(
+      wave = factor(wave, levels = wave_levels, ordered = TRUE),
+      wave_short = dplyr::recode(as.character(wave), !!!wave_labels, .default = as.character(wave))
+    ) %>%
+    filter(is.finite(PDSS), is.finite(age), !is.na(wave))
+
+  # 1) means by wave with n labels
+  means_wave <- dat %>%
+    group_by(wave, wave_short) %>%
+    summarise(
+      mean_pdss = mean(PDSS),
+      sd_pdss   = sd(PDSS),
+      n         = dplyr::n(),
+      .groups = "drop"
+    )
+
+  p_means_wave <- ggplot(means_wave, aes(x = wave_short, y = mean_pdss, group = 1)) +
+    geom_line(color = plot_color_sex) +  
+    geom_point(color = plot_color_sex) +
+    geom_text(aes(label = paste0("n=", n)), vjust = -0.8, size = 3) +
+    coord_cartesian(ylim = c(1, 5)) +
+    labs(
+      x = "Time Point",
+      y = "Mean Pubertal Stage",
+      title = paste0("Mean Pubertal Stage (", sex, ", ", informant, ")")
+    )   +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p_means_wave, file.path(out_dir, paste0(label, "_means_by_wave_filtered.png")), 7, 4)
+
+  # 2) distribution by wave
+  p_box_wave <- ggplot(dat, aes(x = wave, y = PDSS)) +
+    geom_boxplot(fill = plot_color_sex, outlier.shape = NA, alpha = 0.6) + # use fill for boxes
+    geom_jitter(color = plot_color_sex, width = 0.15, alpha = 0.15, size = 0.7) +
+    coord_cartesian(ylim = c(1, 5)) +
+    labs(
+      x = "Time Point",
+      y = "Pubertal Stage",
+      title = paste0("Pubertal Stage Distribution (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p_box_wave, file.path(out_dir, paste0(label, "_box_by_wave_filtered.png")), 7.5, 4.5)
+
+  # 3) connected trajectories across age + GAM
+  p_spaghetti <- ggplot(dat, aes(x = age, y = PDSS, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) + # color for lines
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +    # color for points
+    geom_smooth(aes(group = 1), # override the grouping for this layer only
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) + #
+    coord_cartesian(ylim = c(1, 5)) +
+    labs(
+      x = "Age (years)",
+      y = "Pubertal Stage",
+      title = paste0("Pubertal Stage Across Age with Individual Trajectories (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p_spaghetti, file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered.png")), 7.5, 4.5)
+  
+  
+  p1_spaghetti <- ggplot(dat, aes(x = age, y = peta, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) + # color for lines
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +    # color for points
+    geom_smooth(aes(group = 1), # override the grouping for this layer only
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) + #
+    coord_cartesian(ylim = c(1, 4)) +
+    labs(
+      x = "Age (years)",
+      y = "Growth Spurt",
+      title = paste0("Growth Spurt Item Across Age with Individual Trajectories (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p1_spaghetti, file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered_p1.png")), 7.5, 4.5)
+  
+    p2_spaghetti <- ggplot(dat, aes(x = age, y = petb, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) + # color for lines
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +    # color for points
+    geom_smooth(aes(group = 1), # override the grouping for this layer only
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) + #
+    coord_cartesian(ylim = c(1, 4)) +
+    labs(
+      x = "Age (years)",
+      y = "Body Hair Growth",
+      title = paste0(" Body Hair Growth Item Across Age with Individual Trajectories (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p2_spaghetti, file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered_p2.png")), 7.5, 4.5)
+  
+  p3_spaghetti <- ggplot(dat, aes(x = age, y = petc, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) + # color for lines
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +    # color for points
+    geom_smooth(aes(group = 1), # override the grouping for this layer only
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) + #
+    coord_cartesian(ylim = c(1, 4)) +
+    labs(
+      x = "Age (years)",
+      y = "Skin Changes",
+      title = paste0("Skin Changes Item Across Age with Individual Trajectories (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p3_spaghetti, file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered_p3.png")), 7.5, 4.5)
+  
+  p4_spaghetti <- ggplot(dat, aes(x = age, y = petd, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) + # color for lines
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +    # color for points
+    geom_smooth(aes(group = 1), # override the grouping for this layer only
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) + #
+    coord_cartesian(ylim = c(1, 4)) +
+    labs(
+      x = "Age (years)",
+      y = "Breast Growth / Voice Changes",
+      title = paste0("Breast Growth / Voice Changes Item Across Age with Individual Trajectories (", sex, ", ", informant, ")")
+    )  +
+    theme_minimal() +
+    theme(
+      text = element_text(color = "black", size = 22),
+      axis.text = element_text(color = "black", size = 20),
+      axis.title = element_text(color = "black", size = 22),
+      plot.title = element_text(color = "black", size = 24, face = "bold")
+    )
+
+  safe_save(p4_spaghetti, file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered_p4.png")), 7.5, 4.5)
+  
+if (sex == "m") {
+  # continuous-ish item: facial hair growth
+  p5_spaghetti <- ggplot(dat, aes(x = age, y = mpete, group = id)) +
+    geom_line(alpha = 0.22, linewidth = 0.4, color = plot_color_sex) +
+    geom_point(alpha = 0.18, size = 0.8, color = plot_color_sex) +
+    geom_smooth(
+      aes(group = 1),
+      method  = "gam",
+      formula = y ~ s(x, k = 10),
+      se      = TRUE,
+      color   = plot_color_reporter,
+      fill    = plot_color_reporter,
+      alpha   = 0.2
+    ) +
+    coord_cartesian(ylim = c(1, 4)) +
+    labs(
+      x     = "Age (years)",
+      y     = "Facial Hair Growth",
+      title = paste0(
+        "Facial Hair Growth Item Across Age with Individual Trajectories (",
+        sex, ", ", informant, ")"
+      )
+    ) +
+    theme_minimal() +
+    theme(
+      text        = element_text(color = "black", size = 22),
+      axis.text   = element_text(color = "black", size = 20),
+      axis.title  = element_text(color = "black", size = 22),
+      plot.title  = element_text(color = "black", size = 24, face = "bold")
+    )
+
+} else {
+  # binary-ish item: menarche endorsement
+p5_spaghetti <- ggplot(dat, aes(x = age, y = fpete, group = id)) +
+  geom_line(alpha = 0.15, color = plot_color_sex) +   # link responses per participant
+  geom_point(alpha = 0.10, size = 1, color = plot_color_sex) +  # actual binary points
+  geom_smooth(
+    method = "gam",
+    formula = y ~ s(x, k = 10),
+    se = TRUE,
+    color = plot_color_reporter,
+    fill = plot_color_reporter,
+    alpha = 0.2
+  ) +
+  labs(
+    x = "Age (years)",
+    y = "Probability of Endorsement for Menarche",
+    title = paste0("Menarche Item Across Age (", sex, ", ", informant, ")")
+  ) +
+  theme_minimal() +
+  theme(
+    text       = element_text(color = "black", size = 22),
+    axis.text  = element_text(color = "black", size = 20),
+    axis.title = element_text(color = "black", size = 22),
+    plot.title = element_text(color = "black", size = 24, face = "bold")
+  )
+}
+
+safe_save(
+  p5_spaghetti,
+  file.path(out_dir, paste0(label, "_age_spaghetti_gam_filtered_p5.png")),
+  7.5, 4.5
+)
+
+
+  # 4) observation counts per participant
+  obs_distribution <- dat %>%
+    count(id, name = "observations") %>%
+    count(observations, name = "participants_count") %>%
+    arrange(observations)
+
+  p_obs <- ggplot(obs_distribution, aes(x = factor(observations), y = participants_count)) +
+    geom_col(fill = plot_color_sex) +    
+    labs(
+      x = "Observations Per Participant",
+      y = "Participants",
+      title = paste0("Observation Counts (", sex, ", ", informant, ")")
+    )
+
+  safe_save(p_obs, file.path(out_dir, paste0(label, "_obs_per_participant_filtered.png")), 6.5, 4)
+
+  write_csv(means_wave, file.path(out_dir, paste0("filtered_summary_means_by_wave_", label, ".csv")))
+  write_csv(obs_distribution, file.path(out_dir, paste0("filtered_summary_obs_per_participant_", label, ".csv")))
+
+  invisible(list(means_wave = means_wave, obs_distribution = obs_distribution))
+}
+
+# ------------------------------------------------------------
+# read data and run (unchanged shape)
+# ------------------------------------------------------------
+datasets <- list(
+  pds_m_p = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_parent_tannerstages_m.csv")), sex = "m"),
+  pds_f_p = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_parent_tannerstages_f.csv")), sex = "f"),
+  pds_m_y = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_youth_tannerstages_m.csv")), sex = "m"),
+  pds_f_y = list(df = read.csv(paste0(data_root, "physical-health/puberty/filtered_youth_tannerstages_f.csv")), sex = "f")
+)
+
+visualization_results <- purrr::imap(
+  datasets,
+  ~ {
+    suffix <- sub("^pds_", "", .y)
+    generate_visualizations(df = .x$df, label = .y, sex = .x$sex, out_dir = out_dir)
+  }
+)
+
+
+```
+
+# ts3 for females
+
+```{r ts3 for females}
+## average age at TS3
+
+# calculate average age at the specific value within groups
+avg_age_ts3_f <- PDS_f %>%
+  filter(PDSS == 3) %>%              
+  group_by(id) %>%                     
+  slice_min(order_by = age, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>%                                 
+  summarize(average_age = mean(age, na.rm = TRUE),
+            min_age = min(age, na.rm = TRUE),
+            max_age = max(age, na.rm = TRUE),
+            n_participants = n_distinct(id))
+
+print(avg_age_ts3_f) 
+
+ages_at_ts3_f <- PDS_f %>%
+  filter(PDSS == 3) %>%              
+  group_by(id) %>%                     
+  slice_min(order_by = age, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>% 
+  select(age)
+
+ggplot(ages_at_ts3_f, aes(x = age)) +
+  geom_histogram(binwidth = 0.2, color = "black", fill = "blue", alpha = 0.7) +
+  labs(title = "histogram of ages at TS3 (females)",
+       x = "age",
+       y = "count") +
+  theme_minimal()
+
+```
+
+# ts 3 for males
+
+```{r ts3 for males}
+
+# males
+avg_age_ts3_m <- PDS_m %>%
+  filter(PDSS == 3) %>%              
+  group_by(id) %>%                     
+  slice_min(order_by = age, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>%                                 
+  summarize(average_age = mean(age, na.rm = TRUE),
+            min_age = min(age, na.rm = TRUE),
+            max_age = max(age, na.rm = TRUE),
+            n_participants = n_distinct(id))  
+  
+
+print(avg_age_ts3_m) 
+
+
+ages_at_ts3_m <- PDS_m %>%
+  filter(PDSS == 3) %>%              
+  group_by(id) %>%                     
+  slice_min(order_by = age, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>% 
+  select(age)
+
+ggplot(ages_at_ts3_m, aes(x = age)) +
+  geom_histogram(binwidth = 0.2, color = "black", fill = "blue", alpha = 0.7) +
+    labs(title = "histogram of ages at TS3 (males)",
+       x = "age",
+       y = "count") + 
+  theme_minimal()
+
+```
+
+# extraction!
+
+```{r extraction}
+
+source(paste0(proj_root, "scripts/extraction.R"))
+
+## NEED TO REFINE MODEL FIt STATS
+
+```
+
+
+
+## calculate bmi 
+```{r calculate bmi}
+
+anthro <- read.csv(paste0(data_root, "physical-health/ph_puberty.csv")) %>% 
+  select(participant_id, session_id, 
+ph_y_anthr__height__r01_001, ph_y_anthr__height__r02_001, ph_y_anthr__height__r03_001, ph_y_anthr__height_mean, ph_y_anthr__weight__r01_001, ph_y_anthr__weight__r02_001, ph_y_anthr__weight__r03_001, ph_y_anthr__weight_mean) 
+         
+vars_to_fix <- c(
+"ph_y_anthr__height__r01_001", "ph_y_anthr__height__r02_001", "ph_y_anthr__height__r03_001", "ph_y_anthr__height_mean", "ph_y_anthr__weight__r01_001", "ph_y_anthr__weight__r02_001", "ph_y_anthr__weight__r03_001", "ph_y_anthr__weight_mean"
+)
+
+anthro[vars_to_fix] <- lapply(anthro[vars_to_fix], function(x) ifelse(x == 0, NA, x))
+
+height_vars <- c("ph_y_anthr__height__r01_001", "ph_y_anthr__height__r02_001", "ph_y_anthr__height__r03_001", "ph_y_anthr__height_mean")
+
+weight_vars <- c("ph_y_anthr__weight__r01_001", "ph_y_anthr__weight__r02_001", "ph_y_anthr__weight__r03_001", "ph_y_anthr__weight_mean")
+
+anthro[height_vars] <- lapply(anthro[height_vars], function(x) ifelse(x < 30 | x > 200, NA, x))
+
+anthro[weight_vars] <- lapply(anthro[weight_vars], function(x) ifelse(x < 30, NA, x))
+
+anthro <- anthro %>%
+  filter(
+    if_all(everything(), ~ !(.x %in% c(999, 777)))
+  )
+
+anthro$bmi <- (anthro$ph_y_anthr__weight_mean / (anthro$ph_y_anthr__height_mean^2)) * 703
+
+anthro$height_avg <- rowMeans(anthro[,c("ph_y_anthr__height__r01_001", "ph_y_anthr__height__r02_001", "ph_y_anthr__height__r03_001")], na.rm = TRUE)
+
+# Average weight
+anthro$weight_avg <- rowMeans(anthro[,c("ph_y_anthr__weight__r01_001", "ph_y_anthr__weight__r02_001", "ph_y_anthr__weight__r03_001")], na.rm = TRUE)
+
+# Calculate BMI from averages
+anthro$bmi_avg <- (anthro$weight_avg / (anthro$height_avg^2)) * 703
+
+anthro <- anthro %>% 
+  #filter(bmi_avg < 60) %>% 
+  select(-bmi) %>% 
+  rename("id" = "participant_id",
+         "wave" = "session_id", 
+         "bmi" = "bmi_avg") %>% 
+  select(id, wave, bmi)
+
+write.csv(anthro, file = paste0(proj_root, "bmi-abcd-dissertation.csv"))
+
+
+```
+
+### exploring
+```{r exploration}
+
+tt_f <- read.csv(paste0(data_root, "physical-health/puberty/unique_fam_id_timing_tempo_f.csv"))
+
+tt_m <- read.csv(paste0(data_root, "physical-health/puberty/unique_fam_id_timing_tempo_m.csv"))
+
+sleep <- read.csv(paste0(data_root, "physical-health/ph_p_sds.csv")) %>% 
+  select(src_subject_id, eventname, sds_p_ss_total, sds_p_ss_total_nm) %>% 
+  filter(!sds_p_ss_total_nm > 0) %>% 
+  rename("id" = "src_subject_id",
+         "wave" = "eventname",
+         "sleep_score" = "sds_p_ss_total") %>% 
+  select(-sds_p_ss_total_nm)
+
+exp_f <- left_join(tt_f, sleep, by = c("id", "wave")) %>% 
+    mutate(wave = factor(wave, levels = c("baseline_year_1_arm_1", "1_year_follow_up_y_arm_1", "2_year_follow_up_y_arm_1", "3_year_follow_up_y_arm_1", "4_year_follow_up_y_arm_1"), ordered = TRUE))
+
+cor <- exp_f %>% 
+    group_by(wave) %>%
+    summarize(correlation = cor(PDSS, sleep_score, use = "complete.obs"))
+
+
+exp_m <- left_join(tt_m, sleep, by = c("id", "wave")) %>% 
+    mutate(wave = factor(wave, levels = c("baseline_year_1_arm_1", "1_year_follow_up_y_arm_1", "2_year_follow_up_y_arm_1", "3_year_follow_up_y_arm_1", "4_year_follow_up_y_arm_1"), ordered = TRUE))
+
+ggplot(exp_f, aes(x = PDSS, y = sleep_score, group = id)) +
+  geom_line(alpha = 0.3) +
+  geom_smooth(aes(group = 1), method = "loess", se = TRUE, color = "blue", size = 1.2) +  # overall trend
+  labs(title = "Trajectories of Variable x Over Time",
+       x = "Time",
+       y = "Value") +
+  theme_minimal()
+
+exp_f <- exp_f %>%
+  mutate(
+    PDSS_c = PDSS - mean(PDSS, na.rm = TRUE),
+    age_c = age - mean(age, na.rm = TRUE),
+    PDSS_c2 = PDSS_c^2,
+    PDSS_c3 = PDSS_c^3
+  )
+
+lmerTest::lmer(sleep_score ~ PDSS_c +  age_c + (1 | id), data = exp_f)
+lmerTest::lmer(sleep_score ~ PDSS_c + PDSS_c2 + age_c + (1 | id), data = exp_f)
+
+```
+
+<!-- # inspecting best fitting model for females -->
+
+<!-- ```{r} -->
+
+<!-- library(ggplot2) -->
+
+<!-- ## seeing overall observed trend -->
+<!-- ggplot(PDS_f, aes(x = age, y = PDSS)) + -->
+<!--   geom_point() +  -->
+<!--   geom_smooth() -->
+
+<!-- ## extracting random effects to visualize distribution  -->
+<!-- ranef_df <- data.frame(ranef(cubic_model)$id) -->
+
+<!-- ## visualizing random int -->
+<!-- print("printing dist of random int from best fitting model for females") -->
+<!-- ggplot(ranef_df, aes(x = `X.Intercept.`)) + -->
+<!--   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!--   theme_minimal() + -->
+<!--   labs(title = "Distribution of Random Intercepts") -->
+
+<!-- print("printing dist of random slope from best fitting model for females") -->
+<!-- ggplot(ranef_df, aes(x = age_cen)) + -->
+<!--   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!--   theme_minimal() + -->
+<!--   labs(title = "Distribution of Random Slope") -->
+
+<!-- ``` -->
+
+<!-- # exploring model output - female youth  -->
+
+<!-- ```{r exploring model output - female youth} -->
+
+<!-- resid <- ranef(cubic_model) -->
+
+<!-- puberty_f_filtered$predicted_PDSS <- predict(cubic_model) -->
+
+<!-- ## the model estimates some folks as starting a bit below PDSS1 and ending a bit above PDSS5 so i min and max it here .... not sure how to address this in the actual model?  -->
+
+<!-- puberty_f_filtered$predicted_PDSS <- pmin(pmax(puberty_f_filtered$predicted_PDSS, 1), 5) -->
+
+<!-- ggplot(puberty_f_filtered, aes(x = predicted_PDSS, y = PDSS)) + -->
+<!--   geom_point(color = "blue", alpha = 0.6) + -->
+<!--   geom_smooth(method = "lm", color = "red") + -->
+<!--   theme_minimal() + -->
+<!--   labs(title = "Observed vs. Predicted PDSS", -->
+<!--        x = "Predicted PDSS", -->
+<!--        y = "Observed PDSS") -->
+
+<!-- ## TWC: Added alpha and linewidth to line 508 to enhance the visualization -- this is the plot I'm the most confused by. Is the title right? What was the purpose of this plot? -->
+<!-- ggplot(puberty_f_filtered, aes(x = age_cen)) + -->
+<!--   geom_point(aes(y = PDSS), color = "blue", alpha = 0.5) +  # Observed values -->
+<!--   geom_line(aes(y = predicted_PDSS, group = id), color = "red", alpha =.2, linewidth =.1) +  # Predicted values -->
+<!--   labs(x = "Age (mean centered)", y = "PDS", title = "Observed vs. Predicted PDS") + -->
+<!--   theme_minimal() -->
+
+<!-- ggplot(puberty_f_filtered, aes(x = age_cen, y = PDSS)) + -->
+<!--   geom_point(color = "blue", alpha = 0.6) + -->
+<!--   geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red") + -->
+<!--   theme_minimal() + -->
+<!--   labs(title = "Observed PDSS vs. Age with Quad Model Fit", -->
+<!--        x = "Age (mean centered)", -->
+<!--        y = "PDSS") -->
+
+<!-- ``` -->
+
+
+<!-- # OLD -->
+
+<!-- ## OLD -  cleaning for conversion - youth -->
+
+<!-- ```{r old cleaning for PDS to TS - youth report} -->
+
+<!-- #  -->
+<!-- # # ## loading in raw PDS youth csv -->
+<!-- # #  -->
+<!-- # raw_PDS_y <- read.csv(paste0(root, "data/ph_y_pds.csv")) %>% -->
+<!-- #   rename("id" = "src_subject_id", -->
+<!-- #          "wave" = "eventname", -->
+<!-- #          "sex" = "pds_sex_y") %>% -->
+<!-- #   group_by(id) %>% -->
+<!-- #   fill(sex, .direction = "downup") %>% -->
+<!-- #   ungroup() -->
+<!-- #  -->
+<!-- # raw_PDS_f_y <- raw_PDS_y %>% -->
+<!-- #   filter(sex == 2) %>% -->
+<!-- #   select(id, wave, pds_ht2_y, pds_bdyhair_y, pds_skin2_y, pds_f4_2_y, pds_f5_y) %>% -->
+<!-- #   rename("peta" = "pds_ht2_y", -->
+<!-- #          "petb" = "pds_bdyhair_y", -->
+<!-- #          "petc" = "pds_skin2_y", -->
+<!-- #          "petd" = "pds_f4_2_y", -->
+<!-- #          "fpete" = "pds_f5_y") -->
+<!-- #  -->
+<!-- # raw_PDS_m_y <- raw_PDS_y %>% -->
+<!-- #   filter(sex == 1) %>% -->
+<!-- #   select(id, wave, pds_ht2_y, pds_bdyhair_y, pds_skin2_y, pds_m4_y, pds_m5_y) %>% -->
+<!-- #   rename("peta" = "pds_ht2_y", -->
+<!-- #          "petb" = "pds_bdyhair_y", -->
+<!-- #          "petc" = "pds_skin2_y", -->
+<!-- #          "petd" = "pds_m4_y", -->
+<!-- #          "mpete" = "pds_m5_y") -->
+<!-- # #  -->
+<!-- # # ## seeing how many are putting 999 (don't know) or 777 (refuse to answer) at each wave  -->
+<!-- # #  -->
+<!-- # # long_raw_PDS_f <- raw_PDS_f %>% -->
+<!-- # #   pivot_longer(cols = c(-id, -wave), names_to = "variable", values_to = "value") -->
+<!-- # #  -->
+<!-- # # long_raw_PDS_m <- raw_PDS_m %>% -->
+<!-- # #   pivot_longer(cols = c(-id, -wave), names_to = "variable", values_to = "value") -->
+<!-- # #  -->
+<!-- # # dk_rta_PDS_f <- long_raw_PDS_f %>%  -->
+<!-- # #   filter(value %in% c(999, 777)) %>% -->
+<!-- # #   group_by(wave, variable, value) %>% -->
+<!-- # #   summarise(count = n(), .groups = 'drop') -->
+<!-- # #  -->
+<!-- # # dk_rta_PDS_m <- long_raw_PDS_m %>%  -->
+<!-- # #   filter(value %in% c(999, 777)) %>% -->
+<!-- # #   group_by(wave, variable, value) %>% -->
+<!-- # #   summarise(count = n(), .groups = 'drop') -->
+<!-- # #  -->
+<!-- # # ## saving output -->
+<!-- # # # write.csv(dk_rta_PDS_f, file = paste0(root, "dk_rta_PDS_f.csv")) -->
+<!-- # # #  -->
+<!-- # # # write.csv(dk_rta_PDS_m, file = paste0(root, "dk_rta_PDS_m.csv")) -->
+<!-- # #  -->
+<!-- # # rm(dk_rta_PDS_f, dk_rta_PDS_m, long_raw_PDS_f, long_raw_PDS_m) -->
+<!-- # #  -->
+<!-- # # ## removing rows with 999 or 777 -->
+<!-- # #  -->
+<!-- # raw_PDS_f <- raw_PDS_f %>% -->
+<!-- #   filter(if_all(everything(), ~ !(. %in% c(999, 777)) & !is.na(.))) -->
+<!-- #  -->
+<!-- # raw_PDS_m <- raw_PDS_m %>% -->
+<!-- #   filter(if_all(everything(), ~ !(. %in% c(999, 777)) & !is.na(.))) -->
+
+<!-- ``` -->
+
+<!-- ## OLD - cleaning for conversion - parent -->
+
+<!-- ```{r cleaning for PDS to TS - parent report} -->
+
+<!-- # # ## loading in raw PDS youth csv -->
+<!-- # #  -->
+<!-- # raw_PDS_p <- read.csv(paste0(root, "data/ph_p_pds.csv")) %>% -->
+<!-- #   rename("id" = "src_subject_id", -->
+<!-- #          "wave" = "eventname", -->
+<!-- #          "sex" = "pubertal_sex_p") %>% -->
+<!-- #   group_by(id) %>% -->
+<!-- #   fill(sex, .direction = "downup") %>% -->
+<!-- #   ungroup() -->
+<!-- #  -->
+<!-- # raw_PDS_f <- raw_PDS_p %>% -->
+<!-- #   filter(sex == 2) %>% -->
+<!-- #   select(id, wave, pds_1_p, pds_2_p, pds_3_p, pds_f4_p, pds_f5b_p) %>% -->
+<!-- #   rename("peta" = "pds_1_p", -->
+<!-- #          "petb" = "pds_2_p", -->
+<!-- #          "petc" = "pds_3_p", -->
+<!-- #          "petd" = "pds_f4_p", -->
+<!-- #          "fpete" = "pds_f5b_p") -->
+<!-- #  -->
+<!-- # raw_PDS_m <- raw_PDS_p %>% -->
+<!-- #   filter(sex == 1) %>% -->
+<!-- #   select(id, wave, pds_1_p, pds_2_p, pds_3_p, pds_m4_p, pds_m5_p) %>% -->
+<!-- #   rename("peta" = "pds_1_p", -->
+<!-- #          "petb" = "pds_2_p", -->
+<!-- #          "petc" = "pds_3_p", -->
+<!-- #          "petd" = "pds_m4_p", -->
+<!-- #          "mpete" = "pds_m5_p") -->
+<!-- # # #  -->
+<!-- # # # ## seeing how many are putting 999 (don't know) or 777 (refuse to answer) at each wave  -->
+<!-- # # #  -->
+<!-- # # long_raw_PDS_f <- raw_PDS_f %>% -->
+<!-- # #   pivot_longer(cols = c(-id, -wave), names_to = "variable", values_to = "value") -->
+<!-- # #  -->
+<!-- # # long_raw_PDS_m <- raw_PDS_m %>% -->
+<!-- # #   pivot_longer(cols = c(-id, -wave), names_to = "variable", values_to = "value") -->
+<!-- # #  -->
+<!-- # # dk_rta_PDS_f <- long_raw_PDS_f %>% -->
+<!-- # #   filter(value %in% c(999, 777)) %>% -->
+<!-- # #   group_by(wave, variable, value) %>% -->
+<!-- # #   summarise(count = n(), .groups = 'drop') -->
+<!-- # #  -->
+<!-- # # dk_rta_PDS_m <- long_raw_PDS_m %>% -->
+<!-- # #   filter(value %in% c(999, 777)) %>% -->
+<!-- # #   group_by(wave, variable, value) %>% -->
+<!-- # #   summarise(count = n(), .groups = 'drop') -->
+<!-- # #  -->
+<!-- # # # ## saving output -->
+<!-- # # write.csv(dk_rta_PDS_f, file = paste0(root, "dk_rta_PDS_f_p.csv")) -->
+<!-- # # # -->
+<!-- # # write.csv(dk_rta_PDS_m, file = paste0(root, "dk_rta_PDS_m_p.csv")) -->
+<!-- # #  -->
+<!-- # # rm(dk_rta_PDS_f, dk_rta_PDS_m, long_raw_PDS_f, long_raw_PDS_m) -->
+<!-- # #  -->
+<!-- # # ## removing rows with 999 or 777 -->
+<!-- # #  -->
+<!-- # raw_PDS_f <- raw_PDS_f %>% -->
+<!-- #   filter(if_all(everything(), ~ !(. %in% c(999, 777)) & !is.na(.))) -->
+<!-- #  -->
+<!-- # raw_PDS_m <- raw_PDS_m %>% -->
+<!-- #   filter(if_all(everything(), ~ !(. %in% c(999, 777)) & !is.na(.))) -->
+
+<!-- ``` -->
+
+<!-- ## OLD - conversion for parent report -->
+
+<!-- ```{r old PDS to TS} -->
+
+<!-- # # Label variables  -->
+<!-- # # peta: 'growth in height' (pds_ht2_y) -->
+<!-- # # petb: 'growth of body hair' (pds_bdyhair_y) -->
+<!-- # # petc: 'noticed skin changes' (pds_skin2_y) -->
+<!-- # # petd: 'breasts begun to grow / deepening of voice' (pds_f4_2_y / pds_m4_y) -->
+<!-- # # mpete: 'male grow hair on face' (pds_m5_y) -->
+<!-- # # fpete: 'female begun to menstruate' (pds_f5_y) -->
+<!-- #  -->
+<!-- # # recode variables for females -->
+<!-- # raw_PDS_f <- raw_PDS_f %>% -->
+<!-- #   mutate(petbf = ifelse(petb == 1, 1, -->
+<!-- #                ifelse(petb == 2, 2, -->
+<!-- #                      ifelse(petb == 3, 4, -->
+<!-- #                            ifelse(petb == 4, 5, NA))))) %>% -->
+<!-- #   mutate(petcf = ifelse(petc == 1, 1, -->
+<!-- #                ifelse(petc == 2, 2, -->
+<!-- #                      ifelse(petc == 3, 4, -->
+<!-- #                            ifelse(petc == 4, 5, NA))))) -->
+<!-- #  -->
+<!-- # raw_PDS_f$adrenf_p <- rowMeans(cbind(raw_PDS_f$petbf, raw_PDS_f$petcf), na.rm = TRUE) -->
+<!-- # raw_PDS_f$adrenf2_p <- raw_PDS_f$adrenf_p -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$petb == 1 & raw_PDS_f$adrenf_p == 1.5] <- 1 -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$petb == 2 & raw_PDS_f$adrenf_p == 1.5] <- 2 -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$adrenf_p == 2.5] <- 3 -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$adrenf_p == 3.5] <- 4 -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$adrenf_p == 4.5] <- 5 -->
+<!-- # raw_PDS_f$adrenf2_p[raw_PDS_f$adrenf_p == 5.5] <- 5 -->
+<!-- #  -->
+<!-- # raw_PDS_f <- raw_PDS_f %>% -->
+<!-- #   mutate(petaf = ifelse(peta == 1, 1, -->
+<!-- #                ifelse(peta == 2, 2, -->
+<!-- #                      ifelse(peta == 3, 3, -->
+<!-- #                            ifelse(peta == 4, 5, NA))))) %>% -->
+<!-- #   mutate(petdf = ifelse(petd == 1, 1, -->
+<!-- #                ifelse(petd == 2, 3, -->
+<!-- #                      ifelse(petd == 3, 4, -->
+<!-- #                            ifelse(petd == 4, 5, NA))))) %>% -->
+<!-- #   mutate(petef = ifelse(fpete == 1, 1, -->
+<!-- #                ifelse(fpete == 4, 5, NA))) -->
+<!-- #  -->
+<!-- # raw_PDS_f$gonadf_p <- rowMeans(cbind(raw_PDS_f$petaf, raw_PDS_f$petdf), na.rm = TRUE) -->
+<!-- # raw_PDS_f$gonadf2_p <- raw_PDS_f$gonadf_p -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 1 & raw_PDS_f$petef == 1] <- 1 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 1.5 & raw_PDS_f$petef == 1] <- 1 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 2 & raw_PDS_f$petef == 1] <- 2 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 2.5 & raw_PDS_f$petef == 1] <- 2 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 3 & raw_PDS_f$petef == 1] <- 3 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 3.5 & raw_PDS_f$petef == 1] <- 3 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 4 & raw_PDS_f$petef == 1] <- 3 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 4.5 & raw_PDS_f$petef == 1] <- 4 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 5 & raw_PDS_f$petef == 1] <- 4 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 1 & raw_PDS_f$petef == 5] <- 2 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 1.5 & raw_PDS_f$petef == 5] <- 3 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 2 & raw_PDS_f$petef == 5] <- 4 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 2.5 & raw_PDS_f$petef == 5] <- 4 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 3 & raw_PDS_f$petef == 5] <- 4 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 3.5 & raw_PDS_f$petef == 5] <- 5 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 4 & raw_PDS_f$petef == 5] <- 5 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 4.5 & raw_PDS_f$petef == 5] <- 5 -->
+<!-- # raw_PDS_f$gonadf2_p[raw_PDS_f$gonadf_p == 5 & raw_PDS_f$petef == 5] <- 5 -->
+<!-- #  -->
+<!-- # raw_PDS_f$PDSS <- rowMeans(cbind(raw_PDS_f$gonadf2_p, raw_PDS_f$adrenf2_p), na.rm = TRUE) -->
+<!-- #  -->
+<!-- # # recode variables for males -->
+<!-- # raw_PDS_m <- raw_PDS_m %>% -->
+<!-- #   mutate(petbm = ifelse(petb == 1, 1, -->
+<!-- #                ifelse(petb == 2, 2, -->
+<!-- #                      ifelse(petb == 3, 4, -->
+<!-- #                            ifelse(petb == 4, 5, NA))))) %>% -->
+<!-- #   mutate(petcm = ifelse(petc == 1, 1, -->
+<!-- #                ifelse(petc == 2, 2, -->
+<!-- #                      ifelse(petc == 3, 3, -->
+<!-- #                            ifelse(petc == 4, 4, NA))))) -->
+<!-- #  -->
+<!-- # raw_PDS_m$adrenm_p <- rowMeans(cbind(raw_PDS_m$petbm, raw_PDS_m$petcm), na.rm = TRUE) -->
+<!-- # raw_PDS_m$adrenm2_p <- raw_PDS_m$adrenm_p -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 1] <- 1 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 1.5 & raw_PDS_m$petcm == 1] <- 1 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 1.5 & raw_PDS_m$petcm == 2] <- 2 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 2.5 & raw_PDS_m$petbm != 4] <- 2 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 2.5 & raw_PDS_m$petbm == 4] <- 3 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 3.5] <- 4 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 4.5] <- 5 -->
+<!-- # raw_PDS_m$adrenm2_p[raw_PDS_m$adrenm_p == 5.5] <- 5 -->
+<!-- #  -->
+<!-- # raw_PDS_m <- raw_PDS_m %>% -->
+<!-- #   mutate(petam = ifelse(peta == 1, 1, -->
+<!-- #                ifelse(peta == 2, 3, -->
+<!-- #                      ifelse(peta == 3, 4, -->
+<!-- #                            ifelse(peta == 4, 5, NA))))) %>% -->
+<!-- #   mutate(petdm = ifelse(petd == 1, 1, -->
+<!-- #                ifelse(petd == 2, 2, -->
+<!-- #                      ifelse(petd == 3, 3, -->
+<!-- #                            ifelse(petd == 4, 5, NA))))) -->
+<!-- #  -->
+<!-- # raw_PDS_m$gonadm_p <- rowMeans(cbind(raw_PDS_m$petam, raw_PDS_m$petdm), na.rm = TRUE) -->
+<!-- # raw_PDS_m$gonadm2_p <- raw_PDS_m$gonadm_p -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 1 & raw_PDS_m$mpete == 1] <- 1 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 1 & raw_PDS_m$mpete > 1] <- 2 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 1.5 & raw_PDS_m$mpete == 1] <- 1 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 1.5 & raw_PDS_m$mpete > 1] <- 2 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 2 & raw_PDS_m$mpete == 1 & raw_PDS_m$petd == 1] <- 1 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 2 & raw_PDS_m$mpete == 1 & raw_PDS_m$petd > 1] <- 2 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 2 & raw_PDS_m$mpete > 1] <- 3 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 2.5 & raw_PDS_m$mpete == 1] <- 2 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 2.5 & raw_PDS_m$mpete > 1] <- 3 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 3] <- 3 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 3.5 & raw_PDS_m$mpete == 1] <- 4 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 3.5 & raw_PDS_m$mpete > 2] <- 5 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 4 & raw_PDS_m$mpete == 1] <- 4 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 4 & raw_PDS_m$mpete == 2] <- 4 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p == 4 & raw_PDS_m$mpete > 2] <- 5 -->
+<!-- # raw_PDS_m$gonadm2_p[raw_PDS_m$gonadm_p > 4] <- 5 -->
+<!-- #  -->
+<!-- # ## creating scored dataframe -->
+<!-- #  -->
+<!-- # scored_parent_PDS_f <- raw_PDS_f -->
+<!-- # scored_parent_PDS_m <- raw_PDS_m -->
+<!-- #  -->
+<!-- # scored_parent_PDS_f$PDSS_p <- rowMeans(cbind(scored_youth_PDS_f$gonadf2_p, scored_youth_PDS_f$adrenf2_p), na.rm = TRUE) -->
+<!-- #  -->
+<!-- # scored_parent_PDS_m$PDSS_p <- rowMeans(cbind(scored_youth_PDS_m$gonadm2_p, scored_youth_PDS_m$adrenm2_p), na.rm = TRUE) -->
+<!-- #  -->
+<!-- # rm(raw_PDS_f, raw_PDS_m) -->
+
+<!-- ``` -->
+
+<!-- ## OLD - exploring difference btw abcd calc and pdss - parent -->
+
+<!-- ```{r old checking diff btw calc and abcd PDSS - parent} -->
+<!-- #  -->
+<!-- # puberty_f_p <- puberty %>% -->
+<!-- #   filter(sex == 2) -->
+<!-- #  -->
+<!-- # puberty_m_p <- puberty %>% -->
+<!-- #   filter(sex == 1) -->
+<!-- # #  -->
+<!-- # scored_parent_PDS_f <- scored_youth_PDS_f %>% -->
+<!-- #   select(id, wave, adrenf_p, adrenf2_p, gonadf_p, gonadf2_p, PDSS_p) -->
+<!-- # scored_parent_PDS_m <- scored_parent_PDS_m %>% -->
+<!-- #   select(id, wave, adrenm_p, adrenm2_p, gonadm_p, gonadm2_p, PDSS_p) -->
+<!-- #  -->
+<!-- # puberty_f_p <- left_join(puberty_f_p, scored_parent_PDS_f, by = c("id", "wave")) -->
+<!-- # puberty_m_p <- left_join(puberty_m_p, scored_parent_PDS_m, by = c("id", "wave")) -->
+<!-- # #  -->
+<!-- # # correlations_f <- puberty_f %>% -->
+<!-- # #   group_by(wave) %>% -->
+<!-- # #   summarize(correlation = cor(puberty_status_youth_abcd, PDSS, use = "complete.obs")) -->
+<!-- # #  -->
+<!-- # # print(correlations_f) -->
+<!-- # #  -->
+<!-- # # correlations_m <- puberty_m %>% -->
+<!-- # #   group_by(wave) %>% -->
+<!-- # #   summarize(correlation = cor(puberty_status_youth_abcd, PDSS, use = "complete.obs")) -->
+<!-- # #  -->
+<!-- # # print(correlations_m) -->
+<!-- # #  -->
+<!-- # # rm(correlations_f, correlations_m) -->
+<!-- # #  -->
+<!-- #  -->
+<!-- # write.csv(puberty_f_p, file = "puberty_f_p.csv") -->
+<!-- # write.csv(puberty_m_p, file = "puberty_m_p.csv") -->
+
+
+<!-- ``` -->
+
+<!-- ## OLD - setting up female extraction - parent -->
+
+<!-- ```{r old set up extraction - parent female} -->
+
+<!-- # puberty_f <- read.csv("puberty_f_p.csv") -->
+<!-- #  -->
+<!-- # id_counts <- table(puberty_f$id) -->
+<!-- #  -->
+<!-- # # Identify IDs with more than one time point -->
+<!-- # ids_to_keep <- names(id_counts[id_counts > 1]) -->
+<!-- #  -->
+<!-- # # Filter the dataframe to keep only those IDs -->
+<!-- # puberty_f_filtered <- puberty_f[puberty_f$id %in% ids_to_keep, ] -->
+<!-- #  -->
+<!-- #  -->
+<!-- # library(lme4) -->
+<!-- #  -->
+<!-- # puberty_f_filtered$age <- puberty_f_filtered$age / 12 -->
+<!-- # puberty_f_filtered$age_cen <- scale(puberty_f_filtered$age, center = TRUE, scale = TRUE) -->
+<!-- #  -->
+<!-- # puberty_f_filtered$age_cen_sq <- puberty_f_filtered$age_cen * puberty_f_filtered$age_cen -->
+<!-- # puberty_f_filtered$age_cen_cub <- puberty_f_filtered$age_cen * puberty_f_filtered$age_cen * puberty_f_filtered$age_cen -->
+<!-- #  -->
+<!-- # puberty_f_filtered <- na.omit(puberty_f_filtered[, c("PDSS_p", "age_cen", "age_cen_sq", "age_cen_cub", "id")]) -->
+<!-- #  -->
+<!-- # ## females -->
+<!-- # ## nest by site ??  -->
+<!-- # linear_model <- lmer(PDSS_p ~ age_cen + (1 + age_cen | id), data = puberty_f_filtered) -->
+<!-- # summary(linear_model) -->
+<!-- #  -->
+<!-- # quadratic_model <- lmer(PDSS_p ~ age_cen + age_cen_sq + (1 + age_cen_sq | id), data = puberty_f_filtered) ## best fitting -->
+<!-- # summary(quadratic_model) -->
+<!-- #  -->
+<!-- # cubic_model <- lmer(PDSS_p ~ age_cen + age_cen_sq + age_cen_cub + (1 + age_cen_cub | id), data = puberty_f_filtered) ## something weird going on with this model, assuming because we don't filter for people with more than 3 time points?  -->
+<!-- # summary(cubic_model) -->
+<!-- #  -->
+<!-- # anova(linear_model, quadratic_model, cubic_model) -->
+<!-- #  -->
+<!-- # ## inspecting distribution of ran effects  -->
+<!-- # library(ggplot2) -->
+<!-- #  -->
+<!-- # ranef_df <- data.frame(ranef(quadratic_model)$id) -->
+<!-- #  -->
+<!-- # ggplot(ranef_df, aes(x = `X.Intercept.`)) + -->
+<!-- #   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Distribution of Random Intercepts") -->
+<!-- #  -->
+<!-- # ggplot(ranef_df, aes(x = age_cen_sq)) + -->
+<!-- #   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Distribution of Random Slope") -->
+
+<!-- ``` -->
+
+<!-- ## OLD - exploring model output - female parent  -->
+
+<!-- ```{r old exploring model output - female parent} -->
+<!-- #  -->
+<!-- # resid <- ranef(quadratic_model) -->
+<!-- #  -->
+<!-- # puberty_f_filtered$predicted_PDSS_p <- predict(quadratic_model, re.form = NULL) -->
+<!-- #  -->
+<!-- # ## the model estimates some folks as starting a bit below PDSS1 and ending a bit above PDSS5 so i min and max it here .... not sure how to address this in the actual model?  -->
+<!-- #  -->
+<!-- # puberty_f_filtered$predicted_PDSS_p <- pmin(pmax(puberty_f_filtered$predicted_PDSS_p, 1), 5) -->
+<!-- #  -->
+<!-- # ggplot(puberty_f_filtered, aes(x = predicted_PDSS_p, y = PDSS_p)) + -->
+<!-- #   geom_point(color = "blue", alpha = 0.6) + -->
+<!-- #   geom_smooth(method = "lm", color = "red") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Observed vs. Predicted PDSS", -->
+<!-- #        x = "Predicted PDSS", -->
+<!-- #        y = "Observed PDSS") -->
+<!-- #  -->
+<!-- # ggplot(puberty_f_filtered, aes(x = age_cen)) + -->
+<!-- #   geom_point(aes(y = PDSS_p), color = "blue", alpha = 0.5) +  # Observed values -->
+<!-- #   geom_line(aes(y = predicted_PDSS_p, group = id), color = "red") +  # Predicted values -->
+<!-- #   labs(x = "Age (cen)", y = "PDS", title = "Observed vs. Predicted PDS") + -->
+<!-- #   theme_minimal() -->
+<!-- #  -->
+<!-- # ggplot(puberty_f_filtered, aes(x = age_cen, y = PDSS_p)) + -->
+<!-- #   geom_point(color = "blue", alpha = 0.6) + -->
+<!-- #   geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Observed PDSS vs. Age with Quad Model Fit", -->
+<!-- #        x = "cen Age", -->
+<!-- #        y = "PDSS") -->
+
+<!-- ``` -->
+
+<!-- ## OLD - actual extraction - female parent -->
+
+<!-- ```{r old extraction - female parent} -->
+<!-- # # if it was linear -- age = (2 - fixed_int - rand_int) / (fixed_slope - rand_slope) -->
+<!-- #  -->
+<!-- # ## tempo  -->
+<!-- #  -->
+<!-- # ## want a fixed X to avg the deriv around  -->
+<!-- # ## what y we would expect at each X based on the model and take the differences -->
+<!-- # ### can break into small intervals  -->
+<!-- # #### deriv is change in x / change in y   -->
+<!-- #  -->
+<!-- # ## curvish john package for reference ?  -->
+<!-- # ## look for packages to pull derivatives from lmer objects (https://rdrr.io/cran/merDeriv/man/estfun.lmerMod.html) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # # manual try  -->
+<!-- # fixed_effects <- fixef(quadratic_model) -->
+<!-- #  -->
+<!-- # random_effects <- ranef(quadratic_model)$id -->
+<!-- #  -->
+<!-- # #  the derivative for each participant at each time point -->
+<!-- # puberty_f_filtered$derivative <- fixed_effects["age_cen"] + -->
+<!-- #   2 * (fixed_effects["age_cen_sq"] + random_effects[puberty_f_filtered$id, "age_cen_sq"]) * puberty_f_filtered$age_cen -->
+<!-- #  -->
+<!-- # #  average derivative for each participant -->
+<!-- # average_derivatives <- aggregate(derivative ~ id, data = puberty_f_filtered, FUN = mean) -->
+<!-- #  -->
+<!-- # ## calc predicted age at TS2  -->
+<!-- #  -->
+<!-- # intercept <- fixed_effects["(Intercept)"] + random_effects[,"(Intercept)"] -->
+<!-- # slope_age <- fixed_effects["age_cen"] -->
+<!-- # slope_age_sq <- fixed_effects["age_cen_sq"] + random_effects[,"age_cen_sq"] -->
+<!-- #  -->
+<!-- #  -->
+<!-- # timing <- (-slope_age + sqrt(slope_age^2 - 4 * slope_age_sq * (intercept - 2))) / (2 * slope_age_sq) -->
+<!-- #  -->
+<!-- # female_timing_tempo <- cbind(average_derivatives, timing) %>%  -->
+<!-- #   rename("tempo" = "V1") -->
+<!-- #  -->
+<!-- # write.csv(female_timing_tempo, file = paste0(root, "data/female_timing_tempo_p.csv")) -->
+
+<!-- ``` -->
+
+<!-- ## OLD - setting up for extraction - male parent -->
+
+<!-- ```{r old extraction - male parent} -->
+
+<!-- # puberty_m <- read.csv("puberty_m_p.csv") -->
+<!-- #  -->
+<!-- # id_counts <- table(puberty_m$id) -->
+<!-- #  -->
+<!-- # # Identify IDs with more than one time point -->
+<!-- # ids_to_keep <- names(id_counts[id_counts > 1]) -->
+<!-- #  -->
+<!-- # # Filter the dataframe to keep only those IDs -->
+<!-- # puberty_m_filtered <- puberty_m[puberty_m$id %in% ids_to_keep, ] -->
+<!-- #  -->
+<!-- #  -->
+<!-- # library(lme4) -->
+<!-- #  -->
+<!-- # puberty_m_filtered$age <- puberty_m_filtered$age / 12 -->
+<!-- # puberty_m_filtered$age_cen <- scale(puberty_m_filtered$age, center = TRUE, scale = TRUE) -->
+<!-- #  -->
+<!-- # puberty_m_filtered$age_cen_sq <- puberty_m_filtered$age_cen * puberty_m_filtered$age_cen -->
+<!-- # puberty_m_filtered$age_cen_cub <- puberty_m_filtered$age_cen * puberty_m_filtered$age_cen * puberty_m_filtered$age_cen -->
+<!-- #  -->
+<!-- # puberty_m_filtered <- na.omit(puberty_m_filtered[, c("PDSS_p", "age_cen", "age_cen_sq", "age_cen_cub", "id")]) -->
+<!-- #  -->
+<!-- # ## males -->
+<!-- # ## nest by site ??  -->
+<!-- # linear_model <- lmer(PDSS_p ~ age_cen + (1 + age_cen | id), data = puberty_m_filtered) -->
+<!-- # summary(linear_model) -->
+<!-- #  -->
+<!-- # quadratic_model <- lmer(PDSS_p ~ age_cen + age_cen_sq + (1 + age_cen_sq | id), data = puberty_m_filtered) ## best fitting -->
+<!-- # summary(quadratic_model) -->
+<!-- #  -->
+<!-- # cubic_model <- lmer(PDSS_p ~ age_cen + age_cen_sq + age_cen_cub + (1 + age_cen_cub | id), data = puberty_m_filtered) ## something weird going on with this model, assuming because we don't filter for people with more than 3 time points?  -->
+<!-- # summary(cubic_model) -->
+<!-- #  -->
+<!-- # anova(linear_model, quadratic_model, cubic_model) -->
+<!-- #  -->
+<!-- # ## inspecting distribution of ran effects  -->
+<!-- # library(ggplot2) -->
+<!-- #  -->
+<!-- # ranef_df <- data.frame(ranef(quadratic_model)$id) -->
+<!-- #  -->
+<!-- # ggplot(ranef_df, aes(x = `X.Intercept.`)) + -->
+<!-- #   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Distribution of Random Intercepts") -->
+<!-- #  -->
+<!-- # ggplot(ranef_df, aes(x = age_cen_sq)) + -->
+<!-- #   geom_histogram(bins = 30, color = "black", fill = "blue") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Distribution of Random Slope") -->
+
+<!-- ``` -->
+
+<!-- ## OLD - exploring model output - male parent -->
+
+<!-- ```{r old exploring model output - male parent} -->
+
+<!-- # resid <- ranef(quadratic_model) -->
+<!-- #  -->
+<!-- # puberty_m_filtered$predicted_PDSS_p <- predict(quadratic_model, re.form = NULL) -->
+<!-- #  -->
+<!-- # ## the model estimates some folks as starting a bit below PDSS1 and ending a bit above PDSS5 so i min and max it here .... not sure how to address this in the actual model?  -->
+<!-- #  -->
+<!-- # puberty_m_filtered$predicted_PDSS_p <- pmin(pmax(puberty_m_filtered$predicted_PDSS_p, 1), 5) -->
+<!-- #  -->
+<!-- # ggplot(puberty_m_filtered, aes(x = predicted_PDSS_p, y = PDSS_p)) + -->
+<!-- #   geom_point(color = "blue", alpha = 0.6) + -->
+<!-- #   geom_smooth(method = "lm", color = "red") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Observed vs. Predicted PDSS", -->
+<!-- #        x = "Predicted PDSS", -->
+<!-- #        y = "Observed PDSS") -->
+<!-- #  -->
+<!-- # ggplot(puberty_m_filtered, aes(x = age_cen)) + -->
+<!-- #   geom_point(aes(y = PDSS_p), color = "blue", alpha = 0.5) +  # Observed values -->
+<!-- #   geom_line(aes(y = predicted_PDSS_p, group = id), color = "red") +  # Predicted values -->
+<!-- #   labs(x = "Age (cen)", y = "PDS", title = "Observed vs. Predicted PDS") + -->
+<!-- #   theme_minimal() -->
+<!-- #  -->
+<!-- # ggplot(puberty_m_filtered, aes(x = age_cen, y = PDSS_p)) + -->
+<!-- #   geom_point(color = "blue", alpha = 0.6) + -->
+<!-- #   geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red") + -->
+<!-- #   theme_minimal() + -->
+<!-- #   labs(title = "Observed PDSS vs. Age with Quad Model Fit", -->
+<!-- #        x = "cen Age", -->
+<!-- #        y = "PDSS") -->
+
+<!-- ``` -->
+
+<!-- ## OLD - actual extraction - male parent -->
+
+<!-- ```{r old extraction - male parent} -->
+<!-- # # if it was linear -- age = (2 - fixed_int - rand_int) / (fixed_slope - rand_slope) -->
+<!-- #  -->
+<!-- # ## tempo  -->
+<!-- #  -->
+<!-- # ## want a fixed X to avg the deriv around  -->
+<!-- # ## what y we would expect at each X based on the model and take the differences -->
+<!-- # ### can break into small intervals  -->
+<!-- # #### deriv is change in x / change in y   -->
+<!-- #  -->
+<!-- # ## curvish john package for reference ?  -->
+<!-- # ## look for packages to pull derivatives from lmer objects (https://rdrr.io/cran/merDeriv/man/estfun.lmerMod.html) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # # manual try  -->
+<!-- # fixed_effects <- fixef(quadratic_model) -->
+<!-- #  -->
+<!-- # random_effects <- ranef(quadratic_model)$id -->
+<!-- #  -->
+<!-- # #  the derivative for each participant at each time point -->
+<!-- # puberty_m_filtered$derivative <- fixed_effects["age_cen"] + -->
+<!-- #   2 * (fixed_effects["age_cen_sq"] + random_effects[puberty_m_filtered$id, "age_cen_sq"]) * puberty_m_filtered$age_cen -->
+<!-- #  -->
+<!-- # #  average derivative for each participant -->
+<!-- # average_derivatives <- aggregate(derivative ~ id, data = puberty_m_filtered, FUN = mean) -->
+<!-- #  -->
+<!-- # ## calc predicted age at TS2  -->
+<!-- #  -->
+<!-- # intercept <- fixed_effects["(Intercept)"] + random_effects[,"(Intercept)"] -->
+<!-- # slope_age <- fixed_effects["age_cen"] -->
+<!-- # slope_age_sq <- fixed_effects["age_cen_sq"] + random_effects[,"age_cen_sq"] -->
+<!-- #  -->
+<!-- #  -->
+<!-- # timing <- (-slope_age + sqrt(slope_age^2 - 4 * slope_age_sq * (intercept - 2))) / (2 * slope_age_sq) -->
+<!-- #  -->
+<!-- # male_timing_tempo <- cbind(average_derivatives, timing) %>%  -->
+<!-- #   rename("tempo" = "V1") -->
+<!-- #  -->
+<!-- # write.csv(male_timing_tempo, file = paste0(root, "data/male_timing_tempo_p.csv")) -->
+
+<!-- ``` -->
+
+<!-- # # actual extraction - female youth  -->
+<!-- #  -->
+<!-- # ```{r extraction - female youth} -->
+<!-- # # if it was linear -- age = (2 - fixed_int - rand_int) / (fixed_slope - rand_slope) -->
+<!-- #  -->
+<!-- # ## tempo  -->
+<!-- #  -->
+<!-- # ## want a fixed X to avg the deriv around  -->
+<!-- # ## what y we would expect at each X based on the model and take the differences -->
+<!-- # ### can break into small intervals  -->
+<!-- # #### deriv is change in x / change in y   -->
+<!-- #  -->
+<!-- # ## curvish john package for reference ?  -->
+<!-- # ## look for packages to pull derivatives from lmer objects (https://rdrr.io/cran/merDeriv/man/estfun.lmerMod.html) -->
+<!-- #  -->
+<!-- # ## TWC: I'm not sure why you need to calculate a derivative for each time point, or an average derivative? -->
+<!-- #  -->
+<!-- # #  the derivative for each participant at each time point -->
+<!-- # puberty_f_filtered$derivative <- fixed_effects["age_cen"] + -->
+<!-- #   2 * (fixed_effects["age_cen_sq"] + random_effects[puberty_f_filtered$id, "age_cen_sq"]) * puberty_f_filtered$age_cen  -->
+<!-- #  -->
+<!-- # #  average derivative for each participant -->
+<!-- # average_derivatives <- aggregate(derivative ~ id, data = puberty_f_filtered, FUN = mean) -->
+<!-- #  -->
+<!-- # ## calc predicted age at TS2  -->
+<!-- #  -->
+<!-- # intercept <- fixed_effects["(Intercept)"] + random_effects[,"(Intercept)"] -->
+<!-- # slope_age <- fixed_effects["age_cen"] + random_effects[,"age_cen"] -->
+<!-- # slope_age_sq <- fixed_effects["age_cen_sq"]  -->
+<!-- # sloe_age_cub <- fixed_effects["age_cen_cub"] -->
+<!-- #  -->
+<!-- # ## wait what?? i'm sort of confused why this got so complicated  -->
+<!-- # timing <- (-slope_age + sqrt(slope_age^2 - 4 * slope_age_sq * (intercept - 2))) / (2 * slope_age_sq) -->
+<!-- #  -->
+<!-- # ## TWC: I think this is right and that you need the quadratic equation!! My two things, tied to commenst above, is whether you want to have a random slope for age versus or in addition to age_sq, and whether you want to not z-score age -->
+<!-- #  -->
+<!-- # female_timing_tempo <- cbind(average_derivatives, timing) %>%  -->
+<!-- #   rename("tempo" = "derivative") -->
+<!-- #  -->
+<!-- # write.csv(female_timing_tempo, file = paste0(root, "data/female_timing_tempo_full.csv")) -->
+
+
+<!-- <!-- # actual extraction - male youth --> -->
+
+<!-- <!-- ```{r extraction - male youth} --> -->
+<!-- <!-- # if it was linear -- age = (2 - fixed_int - rand_int) / (fixed_slope - rand_slope) --> -->
+
+<!-- <!-- ## tempo  --> -->
+
+<!-- <!-- ## want a fixed X to avg the deriv around  --> -->
+<!-- <!-- ## what y we would expect at each X based on the model and take the differences --> -->
+<!-- <!-- ### can break into small intervals  --> -->
+<!-- <!-- #### deriv is change in x / change in y   --> -->
+
+<!-- <!-- ## curvish john package for reference ?  --> -->
+<!-- <!-- ## look for packages to pull derivatives from lmer objects (https://rdrr.io/cran/merDeriv/man/estfun.lmerMod.html) --> -->
+
+
+<!-- <!-- # manual try  --> -->
+<!-- <!-- fixed_effects <- fixef(cubic_model) --> -->
+
+<!-- <!-- random_effects <- ranef(cubic_model)$id --> -->
+
+<!-- <!-- # TWC: same comments as above --> -->
+<!-- <!-- #  the derivative for each participant at each time point --> -->
+<!-- <!-- puberty_m_filtered$derivative <- fixed_effects["age_cen"] + --> -->
+<!-- <!--   2 * fixed_effects["age_cen_sq"] * puberty_m_filtered$age_cen + --> -->
+<!-- <!--   3 * (fixed_effects["age_cen_cub"] + random_effects[puberty_m_filtered$id, "age_cen_cub"]) * puberty_m_filtered$age_cen^2 --> -->
+
+<!-- <!-- #  average derivative for each participant --> -->
+<!-- <!-- average_derivatives <- aggregate(derivative ~ id, data = puberty_m_filtered, FUN = mean) --> -->
+
+<!-- <!-- ## calc predicted age at TS2  --> -->
+<!-- <!-- ## TWC: same Qs as for females wrt where you want random effects (for age and age2?) --> -->
+<!-- <!-- intercept <- fixed_effects["(Intercept)"] + random_effects[,"(Intercept)"] --> -->
+<!-- <!-- slope_age <- fixed_effects["age_cen"] + random_effects[,"age_cen"] --> -->
+<!-- <!-- slope_age_sq <- fixed_effects["age_cen_sq"] --> -->
+<!-- <!-- slope_age_cub <- fixed_effects["age_cen_cub"]  --> -->
+
+<!-- <!-- # Coefficients of the cubic equation --> -->
+<!-- <!-- coeffs <- c(intercept - 2, slope_age, slope_age_sq, slope_age_cub) # TWC: the docs ask for the order of coefficients should be in increasing order --> -->
+<!-- <!-- print(coeffs) --> -->
+
+<!-- <!-- # Find roots (timing at TS2) (STOPS WORKING HERE)  --> -->
+<!-- <!-- timing <- polyroot(coeffs_TWC[1:4]) # TWC: i think it is overwhelmed because the coeffs has all participants coefficients in one long vector and you might need to give it each participant at a time --> -->
+
+<!-- <!-- # Extract the real solution(s) --> -->
+<!-- <!-- timing <- Re(timing[abs(Im(timing)) < 1e-6]) --> -->
+
+<!-- <!-- male_timing_tempo <- cbind(average_derivatives, timing) %>%  --> -->
+<!-- <!--   rename("tempo" = "V1") --> -->
+
+<!-- <!-- write.csv(male_timing_tempo, file = paste0(root, "data/male_timing_tempo_y.csv")) --> -->
+
+<!-- <!-- ``` --> -->
+
